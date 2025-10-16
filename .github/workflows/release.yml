@@ -1,83 +1,90 @@
-name: "Release Docker Image"
-run-name: "Release Docker Image ${{ github.event_name == 'workflow_dispatch' && '(manual)' || '(auto-deploy)' }}"
+name: Release Docker Image
+
+run-name: Release Docker Image ${{ github.event_name == 'workflow_dispatch' && '(manual)' || '(auto-deploy)' }}
 
 on:
-  release:
-    types: [published]
+  push:
+    branches:
+      - main
+
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release (e.g. 1.2.3)'
-        required: false
-      dry_run:
-        description: 'Whether to run in dry-run mode'
+        description: |
+          Version (of the form "1.2.3") or Branch (of the form "origin/branch-name").
+          Leave empty to bump the latest version.
+        type: string
+      version_level:
+        description: The level of the version to bump.
+        type: choice
+        default: 'minor'
+        required: true
+        options:
+          - 'major'
+          - 'minor'
+          - 'patch' 
+      build_local:
         type: boolean
         default: false
-      build_local:
-        description: 'Whether to build locally or use hydrobuild'
+        description: Uses build-cloud by default. If Build Cloud is down, set this to true to build locally.
+      dry_run:
+        description: If true, the workflow will not push the image to the registry.
         type: boolean
         default: false
 
+
 env:
-  NAME: hub-mcp
-  VERSION_LEVEL: patch
+  GOPRIVATE: github.com/docker
+  NAME: dockerhub-mcp
+  VERSION_LEVEL: ${{ inputs.version_level || 'minor' }}
 
 jobs:
   release:
-    name: Release service
+    name: Release Service
+    permissions:
+      pull-requests: write
+      # This permission is required to update the PR body content
+      repository-projects: write
+      # These permissions are needed to interact with GitHub's OIDC Token
+      # endpoint. We need it in order to make requests to AWS ECR for image
+      # mirroring.
+      id-token: write
+      contents: read
     runs-on: ubuntu-latest
+    # Internally the create-release action attempts to push a commit to
+    # cloud-manifests in a loop to avoid race-conditions. However, this could
+    # have the side-effect of making the action hang for ever if we come across
+    # a scenario that we haven't thought of. This timeout makes sure to fail the
+    # workflow if that happens.
+    timeout-minutes: 10
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Setup
+        uses: docker/actions/setup-go@33488d0ac7cf5f3616b656b8f2bf28b45467976c #v1.17.0
+        id: setup_go
         with:
+          app_id: ${{ secrets.HUB_PLATFORM_APP_ID }}
+          app_private_key: ${{ secrets.HUB_PLATFORM_APP_PRIVATE_KEY }}
+          go_version: '1.24'
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 #v4.2.2
+        with:
+          token: ${{ steps.setup_go.outputs.token }}
           fetch-depth: 0 
 
       - name: Bump Version
         id: bump_version
-        shell: bash
-        run: |
-          set -euo pipefail
+        uses: docker/actions/bump-version@132452b833c5fae71bc674fe54384c9242173f96 # v2.5.0
+        with:
+          name: ${{ env.NAME }}
+          level: ${{ env.VERSION_LEVEL }}
 
-          # If a version input was provided, use it directly
-          if [[ "${{ inputs.version }}" != "" ]]; then
-            echo "new_version=${{ inputs.version }}" >> $GITHUB_OUTPUT
-            # don't create a tag name in this quick fix path (leave empty or set to v<ver> if desired)
-            echo "new_tag=" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          # Find latest tag (fall back to 0.0.0)
-          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || true)
-          if [[ -z "$latest_tag" ]]; then
-            latest="0.0.0"
-          else
-            # strip leading 'v' if present
-            latest="${latest_tag#v}"
-          fi
-
-          IFS='.' read -r major minor patch <<< "$latest"
-          major=${major:-0}
-          minor=${minor:-0}
-          patch=${patch:-0}
-
-          case "${{ env.VERSION_LEVEL }}" in
-            major) major=$((major+1)); minor=0; patch=0;;
-            minor) minor=$((minor+1)); patch=0;;
-            patch) patch=$((patch+1));;
-            *) minor=$((minor+1)); patch=0;;
-          esac
-
-          new_version="${major}.${minor}.${patch}"
-          new_tag="v${new_version}"
-
-          echo "new_version=${new_version}" >> $GITHUB_OUTPUT
-          echo "new_tag=${new_tag}" >> $GITHUB_OUTPUT
 
       - name: Get Release Version
         id: release_version
         shell: bash
         run: |
-          if [[ '${{ steps.bump_version.outputs.new_version }}' != '' ]]; then
+          if [[ '${{ steps.bump_version.outcome }}' == 'success' ]]; then
             echo "version=${{ steps.bump_version.outputs.new_version }}" >> $GITHUB_OUTPUT
             echo "tag=${{ steps.bump_version.outputs.new_tag }}" >> $GITHUB_OUTPUT
           elif [[ '${{ inputs.version }}' != '' ]]; then
@@ -115,6 +122,10 @@ jobs:
 
       - name: Ensure attestations are supported
         shell: bash
+        # docker buildx inspect | grep Driver
+        # Driver:        docker
+        # indicates that we need to enable containerd so
+        # we can compute sboms.
         run: |
           driver=$(docker buildx inspect | grep "Driver:")
           if [[ "$driver" == *"docker"* ]]; then
@@ -127,13 +138,13 @@ jobs:
             fi
             sudo systemctl restart docker
           fi
+  
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
-
+  
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3
-
       - name: Build and push service image
         id: build_and_push
         if: steps.hub_image_exists.outputs.exists == 'false'
@@ -161,3 +172,5 @@ jobs:
         shell: bash
         run: |
           git push --delete origin ${{ steps.bump_version.outputs.new_tag }}
+        
+  
