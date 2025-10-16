@@ -87,8 +87,6 @@ jobs:
           if [[ '${{ steps.bump_version.outcome }}' == 'success' ]]; then
             echo "version=${{ steps.bump_version.outputs.new_version }}" >> $GITHUB_OUTPUT
             echo "tag=${{ steps.bump_version.outputs.new_tag }}" >> $GITHUB_OUTPUT
-          elif [[ '${{ steps.bump_version.outcome }}' == 'success' ]]; then
-            echo "version=${{ steps.bump_version.outputs.new_version }}" >> $GITHUB_OUTPUT
           elif [[ '${{ inputs.version }}' != '' ]]; then
             echo "Using already provided version: ${{ inputs.version }}."
             echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
