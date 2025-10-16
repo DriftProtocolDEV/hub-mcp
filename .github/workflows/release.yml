@@ -131,4 +131,6 @@
     if: failure() && steps.bump_version.outputs.new_tag != ''
     shell: bash
     run: |
-      git push --delete origin ${{ steps.bump_version.outputs.new_tag }}
+      if [[ -n "${{ steps.bump_version.outputs.new_tag }}" ]]; then
+        git push --delete origin ${{ steps.bump_version.outputs.new_tag }}
+      fi
